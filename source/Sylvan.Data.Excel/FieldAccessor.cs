@@ -1,5 +1,4 @@
 ﻿using System.Diagnostics.CodeAnalysis;
-using System.Reflection;
 using System.Runtime.CompilerServices;
 
 namespace Sylvan.Data.Excel;
@@ -10,130 +9,74 @@ static class Accessor<T>
 
 	static IFieldAccessor<T> GetAccessor()
 	{
-		var acc = ExcelDataAccessor.Instance as IFieldAccessor<T>;
-		if (acc == null)
+		if (ExcelDataAccessor.Instance is IFieldAccessor<T> acc)
 		{
-			if (typeof(T).IsEnum)
-			{
-#if NETSTANDARD2_0
-
-				if (true)
-#else
-				if (RuntimeFeature.IsDynamicCodeSupported)
-#endif
-				{
-					return EnumAccessor<T>.Instance;
-				} 
-				else
-				{
-
-#if NET5_0_OR_GREATER
-					return EnumAccessorAOT<T>.Instance;
-#endif
-				}
-			}
-			throw new NotSupportedException($"GetFieldValue<{typeof(T).Name}>() is not supported by {nameof(ExcelDataReader)}.");
+			return acc;
 		}
-		return acc;
+
+		if (typeof(T).IsEnum)
+		{
+#if !NETSTANDARD2_0
+			if (RuntimeFeature.IsDynamicCodeSupported)
+			{
+				return NonBoxingEnumAccessor.Instance<T>();
+			}
+#endif
+			return EnumAccessor<T>.Instance;
+		}
+
+		throw new NotSupportedException($"GetFieldValue<{typeof(T).Name}>() is not supported by {nameof(ExcelDataReader)}.");
 	}
 }
 
-#if NET5_0_OR_GREATER
-
-sealed class EnumAccessorAOT<T> : IFieldAccessor<T>
+class EnumAccessor<T> : IFieldAccessor<T>
 {
-	internal static EnumAccessorAOT<T> Instance = new EnumAccessorAOT<T>();
+	internal static EnumAccessor<T> Instance = new EnumAccessor<T>();
 
-	static readonly Type EnumType = typeof(T);
-	
+	public virtual T GetValue(ExcelDataReader reader, int ordinal)
+	{
+		var str = reader.GetString(ordinal);
+		if (str.Length == 0) return default!;
+
+		return (T)Enum.Parse(typeof(T), str, true);
+	}
+}
+
+#if !NETSTANDARD2_0
+static class NonBoxingEnumAccessor
+{
+#if NET5_0_OR_GREATER
+	[UnconditionalSuppressMessage("AOT",
+		"IL3050:Calling members annotated with 'RequiresDynamicCodeAttribute' may break functionality when AOT compiling.",
+		Justification = "This codepath is not invoked in AOT compilations.")]
+	[UnconditionalSuppressMessage("Trimming",
+		"IL2090:'this' argument does not satisfy 'DynamicallyAccessedMemberTypes.PublicParameterlessConstructor' in call to 'System.Type.MakeGenericType(params Type[])'.",
+		Justification = "This codepath is not invoked in AOT compilations.")]
+#endif
+	public static IFieldAccessor<T> Instance<T>()
+	{
+		var accessorType = typeof(NonBoxingEnumAccessor<>).MakeGenericType(typeof(T));
+		var accessor = Activator.CreateInstance(accessorType) ?? throw new InvalidOperationException($"Activator.CreateInstance failed for {nameof(NonBoxingEnumAccessor)}<{typeof(T).Name}>");
+		return (IFieldAccessor<T>)accessor;
+	}
+}
+
+sealed class NonBoxingEnumAccessor<T> : IFieldAccessor<T> where T : struct
+{
 	public T GetValue(ExcelDataReader reader, int ordinal)
 	{
 		var str = reader.GetString(ordinal);
 		if (str.Length == 0) return default!;
 
-		return
-			Enum.TryParse(EnumType, str, true, out var value)
-			? (T)value!
-			: throw new InvalidCastException();
+		return Enum.Parse<T>(str, true);
 	}
 }
-
 #endif
-
-delegate bool TryParse<T>(string str, bool ignoreCase, out T value);
-
-static class EnumParse
-{
-	internal static MethodInfo? GenericSpanParseMethod;
-
-	static MethodInfo? GetGenericMethod()
-	{
-		return
-			typeof(Enum)
-			.GetMethods()
-			.Where(m =>
-			{
-				if (m.Name != "TryParse")
-					return false;
-				var p = m.GetParameters();
-				return p.Count() == 3 && p[0].ParameterType == typeof(string);
-			}
-			)
-			.SingleOrDefault();
-	}
-
-	static EnumParse()
-	{
-		GenericSpanParseMethod = GetGenericMethod();
-	}
-}
-
-sealed class EnumAccessor<T> : IFieldAccessor<T>
-{
-	internal static EnumAccessor<T> Instance = new EnumAccessor<T>();
-
-	internal static TryParse<T>? Parser;
-
-#if NET5_0_OR_GREATER
-	[UnconditionalSuppressMessage("AOT", "IL3050:Calling members annotated with 'RequiresDynamicCodeAttribute' may break functionality when AOT compiling.", 
-		Justification = "This codepath is not invoked in AOT compilations.")]
-#endif
-	static EnumAccessor()
-	{
-#if !NETSTANDARD2_0
-		if (RuntimeFeature.IsDynamicCodeSupported)
-#endif
-		{
-			Parser = null;
-			var method = EnumParse.GenericSpanParseMethod;
-			if (method != null)
-			{
-				var gm = method.MakeGenericMethod(new[] { typeof(T) });
-				Parser = (TryParse<T>)gm.CreateDelegate(typeof(TryParse<T>));
-			}
-		}
-	}
-
-	public T GetValue(ExcelDataReader reader, int ordinal)
-	{
-		var parser = Parser;
-		if (parser == null)
-		{
-			throw new NotSupportedException();
-		}
-		var span = reader.GetString(ordinal);
-		if (span.Length == 0) return default!;
-		return
-			parser(span, true, out T value)
-			? value
-			: throw new InvalidCastException();
-	}
-}
 
 // these accessors support the GetFieldValue<T> generic accessor method.
 // most of them defer to ExcelDataReader.GetXXX methods.
 
-interface IFieldAccessor<T>
+interface IFieldAccessor<out T>
 {
 	T GetValue(ExcelDataReader reader, int ordinal);
 }
@@ -143,7 +86,7 @@ interface IFieldAccessor
 	object GetValueAsObject(ExcelDataReader reader, int ordinal);
 }
 
-interface IFieldRangeAccessor<T>
+interface IFieldRangeAccessor<in T>
 {
 	long GetRange(ExcelDataReader reader, long dataOffset, int ordinal, T[] buffer, int bufferOffset, int length);
 }
