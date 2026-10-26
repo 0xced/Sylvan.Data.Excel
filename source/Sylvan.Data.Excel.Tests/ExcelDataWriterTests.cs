@@ -211,6 +211,7 @@ public abstract class ExcelDataWriterTests
 					ValueDouble = r.NextDouble() * 100d, // double
 					Amount = (decimal)r.NextDouble(), // decimal
 					DateTime = new DateTime(2020, 1, 1).AddHours(i), // datetime
+					DayOfWeek = DayOfWeek.Sunday, // enum
 				}
 			);
 
